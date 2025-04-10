@@ -1,151 +1,332 @@
 # backend/app.py
 import os
+import requests
+import polyline # For decoding Google polylines
+import math # Potentially for distance calculations
 from flask import Flask, jsonify, request, g # Added g for potential future auth context
 from dotenv import load_dotenv
 from flask_cors import CORS
-import requests
 from pymongo import MongoClient
-from bson import ObjectId # Make sure this is imported
-from bson.errors import InvalidId # Import for error handling
-from datetime import datetime # Make sure this is imported
-import polyline # If you're using the polyline decoding helper
-import math # For distance calculations if needed
+from bson import ObjectId
+from bson.errors import InvalidId
+from datetime import datetime, timedelta # Added timedelta for cache TTL example
 
+# Load environment variables from .env file
 load_dotenv()
 
+# --- Flask App Initialization ---
 app = Flask(__name__)
-CORS(app, resources={r"/api/*": {"origins": [os.getenv("FRONTEND_URL", "http://localhost:5173")]}})
 
-# --- Database Setup (Keep as is) ---
+# --- CORS Configuration ---
+# Allow requests only from the frontend URL specified in env var
+# Defaults to localhost:5173 for local development
+frontend_url = os.getenv("FRONTEND_URL", "http://localhost:5173")
+CORS(app, resources={r"/api/*": {"origins": [frontend_url]}})
+print(f"CORS enabled for origin: {frontend_url}") # Log the CORS origin
+
+# --- Database Setup (MongoDB Atlas) ---
 MONGO_URI = os.getenv("MONGO_URI")
-# ... (rest of DB setup including indexes) ...
-try:
-    client = MongoClient(MONGO_URI)
-    db = client.accessible_nav_db
-    client.admin.command('ping')
-    print("Successfully connected to MongoDB Atlas!")
-    # Ensure indexes are created (idempotent operation)
-    db.accessibility_points.create_index([("location", "2dsphere")])
-    db.routes.create_index([("userId", 1)])
-    # Consider adding index for users collection if querying by authId often
-    # db.users.create_index([("authId", 1)], unique=True) # Example
-except Exception as e:
-    print(f"Error connecting to MongoDB: {e}")
-    client = None
-    db = None
+db = None # Initialize db to None
+client = None # Initialize client to None
 
-# --- Google Maps API Setup (Keep as is) ---
+if not MONGO_URI:
+    print("Warning: MONGO_URI environment variable not set. Database functionality disabled.")
+else:
+    try:
+        client = MongoClient(MONGO_URI, serverSelectionTimeoutMS=5000) # Add timeout
+        db = client.accessible_nav_db # Choose your database name
+        # Test connection
+        client.admin.command('ping')
+        print("Successfully connected to MongoDB Atlas!")
+
+        # --- Create Indexes (Important for performance - idempotent) ---
+        print("Ensuring database indexes...")
+        # Geospatial index for accessibility points
+        db.accessibility_points.create_index([("location", "2dsphere")], name="location_2dsphere")
+        # Index user ID for faster route lookups
+        db.routes.create_index([("userId", 1)], name="routes_userId_1")
+        # Index user ID for faster preference lookups (using placeholder name)
+        db.users.create_index([("userId", 1)], name="users_userId_1")
+        print("Database indexes ensured.")
+
+    except Exception as e:
+        print(f"Error connecting to MongoDB or creating indexes: {e}")
+        db = None # Ensure db is None if connection failed
+        client = None
+
+
+# --- Google Maps API Setup ---
 GOOGLE_MAPS_API_KEY = os.getenv("GOOGLE_MAPS_API_KEY")
-# ...
+if not GOOGLE_MAPS_API_KEY:
+     print("Warning: GOOGLE_MAPS_API_KEY environment variable not set. Route calculation disabled.")
 
-# --- Caching Setup (Keep as is) ---
+
+# --- Simple In-Memory Cache for Routes ---
+# Note: This cache is lost on server restart/deploy.
+# Consider Redis or MongoDB TTL collections for more persistent caching.
 route_cache = {}
-MAX_CACHE_SIZE = 100
-# ... (clean_cache function) ...
+MAX_CACHE_SIZE = 100 # Limit cache size for free tier memory
 
-# --- Helper Functions (Keep as is or add more) ---
-# ... (find_nearby_accessibility_issues, decode_polyline etc.) ...
+def clean_cache():
+    """Removes oldest items if cache exceeds max size (simple FIFO)."""
+    if len(route_cache) > MAX_CACHE_SIZE:
+        num_to_remove = len(route_cache) - MAX_CACHE_SIZE
+        keys_to_remove = list(route_cache.keys())[:num_to_remove]
+        for key in keys_to_remove:
+            route_cache.pop(key, None)
+        print(f"Cache cleaned. Removed {num_to_remove} items.")
+
+
+# --- Placeholder Helper Functions ---
+
+def decode_google_polyline(encoded_polyline):
+    """Decodes a Google Maps encoded polyline string into list of (lat, lng) tuples."""
+    if not encoded_polyline:
+        return []
+    try:
+        # polyline library returns [(lat, lng), ...]
+        return polyline.decode(encoded_polyline)
+    except Exception as e:
+        print(f"Error decoding polyline: {e}")
+        return []
+
+def find_nearby_accessibility_issues(route_points_decoded, radius_meters=25):
+    """ Finds accessibility points near a list of route coordinates from MongoDB """
+    if not db or not route_points_decoded: return []
+
+    # Reduce density of points to check for performance if route is long
+    step = max(1, len(route_points_decoded) // 100) # Check approx 100 points along route
+    points_to_check = route_points_decoded[::step]
+
+    found_issues = []
+    unique_issue_ids = set()
+
+    for point in points_to_check:
+        # MongoDB $nearSphere requires coordinates in [lng, lat] order
+        query_point = [point[1], point[0]]
+        query = {
+            "location": {
+                "$nearSphere": {
+                    "$geometry": {
+                        "type": "Point",
+                        "coordinates": query_point
+                    },
+                    "$maxDistance": radius_meters
+                }
+            },
+            # Optional: Filter for specific types or verified status
+            # "status": "verified"
+        }
+        try:
+            # Limit fields returned for efficiency
+            issues = list(db.accessibility_points.find(query, {"_id": 1, "type": 1, "description": 1, "location": 1}))
+            for issue in issues:
+                 # Add unique issues
+                 issue_id_str = str(issue['_id'])
+                 if issue_id_str not in unique_issue_ids:
+                     issue['_id'] = issue_id_str # Convert ObjectId for JSON
+                     # Add lat/lng for easier frontend use if needed
+                     issue['lat'] = issue['location']['coordinates'][1]
+                     issue['lng'] = issue['location']['coordinates'][0]
+                     # del issue['location'] # Optionally remove original GeoJSON
+                     found_issues.append(issue)
+                     unique_issue_ids.add(issue_id_str)
+        except Exception as e:
+            print(f"Error querying accessibility points near {query_point}: {e}")
+
+    print(f"Found {len(found_issues)} unique accessibility issues near route.")
+    return found_issues
 
 
 # --- Utility for Placeholder Auth ---
-# In a real app, this would be replaced by middleware that verifies a JWT token
-# or session and sets g.user_id and potentially g.user_roles
 def get_current_user_id():
-    # Placeholder: Replace with actual authentication logic
-    # For now, we return a static ID for testing purposes.
-    # In production, you'd extract this from a verified session or token.
-    # Example using Flask's 'g' object if set by middleware:
-    # return getattr(g, 'user_id', None)
-    return "temp_user_id_for_testing" # <<< REPLACE THIS WITH REAL AUTH
+    """Placeholder: Replace with actual authentication logic."""
+    # return getattr(g, 'user_id', None) # Example if using Flask 'g'
+    return "temp_user_id_for_testing" # <<< REPLACE WITH REAL AUTH
 
-# --- Base Route (Keep as is) ---
+
+# ===========================================
+#             API Endpoints
+# ===========================================
+
+# --- Base Route ---
 @app.route('/')
 def index():
-    # ...
+    """Base route providing a welcome message."""
     return jsonify({"message": "Welcome to the Accessible Navigation API!"})
-    pass # Keep existing code
 
-# --- Route Calculation Endpoint (Keep as is) ---
+
+# --- Route Calculation Endpoint ---
 @app.route('/api/route', methods=['POST'])
 def get_route():
-    # ...
-    pass # Keep existing code
+    """Calculates a route using Google Directions API, checks cache, and supplements with custom data."""
+    if not GOOGLE_MAPS_API_KEY:
+         return jsonify({"error": "Server configuration error: Missing Google API Key"}), 503 # Service Unavailable
+    if not db:
+        print("Warning: Route calculation attempted but database unavailable.")
+        # Proceed without custom data, or return error? Depends on requirements.
+        # return jsonify({"error": "Server configuration error: Database not available"}), 503
+
+    data = request.get_json()
+    origin = data.get('origin') # Expecting {lat: number, lng: number} or address string
+    destination = data.get('destination')
+    preferences = data.get('preferences', {})
+    avoid_stairs = preferences.get('avoidStairs', True)
+    wheelchair_accessible_transit = preferences.get('wheelchairAccessibleTransit', True)
+    preferred_mode = preferences.get('mode', 'walking') # Allow mode selection ('walking', 'transit', 'driving')
+
+    if not origin or not destination:
+        return jsonify({"error": "Origin and destination are required"}), 400
+
+    # --- Cache Check ---
+    cache_key = f"{origin}_{destination}_{avoid_stairs}_{wheelchair_accessible_transit}_{preferred_mode}"
+    if cache_key in route_cache:
+         print(f"Returning cached route for key: {cache_key}")
+         # Optionally add custom warnings even to cached routes if needed
+         cached_data = route_cache[cache_key]
+         # Example: Re-query custom data if it might have changed
+         # overview_polyline = cached_data.get('routes', [{}])[0].get('overview_polyline', {}).get('points')
+         # decoded_points = decode_google_polyline(overview_polyline)
+         # custom_warnings = find_nearby_accessibility_issues(decoded_points)
+         # cached_data['custom_accessibility_warnings'] = custom_warnings
+         return jsonify(cached_data)
+
+    # --- Call Google Directions API ---
+    # Ensure origin/destination are formatted correctly
+    origin_param = f"{origin['lat']},{origin['lng']}" if isinstance(origin, dict) else origin
+    destination_param = f"{destination['lat']},{destination['lng']}" if isinstance(destination, dict) else destination
+
+    params = {
+        'origin': origin_param,
+        'destination': destination_param,
+        'key': GOOGLE_MAPS_API_KEY,
+        'mode': preferred_mode,
+        # 'alternatives': 'true', # Request alternative routes if needed
+    }
+
+    # Apply accessibility parameters based on mode
+    if params['mode'] == 'walking' and avoid_stairs:
+         params['avoid'] = 'stairs' # Note: Google's support for this varies by region
+    elif params['mode'] == 'transit' and wheelchair_accessible_transit:
+         params['transit_mode'] = 'wheelchair' # Specifically requests WC-accessible transit
+
+    api_url = "https://maps.googleapis.com/maps/api/directions/json"
+    print(f"Requesting Google Directions: {params}")
+
+    try:
+        response = requests.get(api_url, params=params, timeout=10) # Add timeout
+        response.raise_for_status() # Raise HTTPError for bad responses (4xx or 5xx)
+        route_data = response.json()
+
+        if route_data['status'] != 'OK':
+            print(f"Google Directions API Error: {route_data['status']} - {route_data.get('error_message', '')}")
+            # Avoid caching errors unless specific ones like ZERO_RESULTS
+            if route_data['status'] == 'ZERO_RESULTS':
+                return jsonify({"error": "No route found matching criteria.", "status": route_data['status']}), 404
+            else:
+                # Log the detailed error from Google if available
+                error_detail = route_data.get('error_message', 'Unknown Google API error')
+                return jsonify({"error": f"Failed to calculate route. Google status: {route_data['status']}", "detail": error_detail}), 502 # Bad Gateway
+
+        # --- Supplement with Custom Accessibility Data ---
+        custom_warnings = []
+        if db and route_data.get('routes'):
+            # Get the primary route's overview polyline
+            overview_polyline = route_data['routes'][0].get('overview_polyline', {}).get('points')
+            if overview_polyline:
+                decoded_points = decode_google_polyline(overview_polyline)
+                if decoded_points:
+                    custom_warnings = find_nearby_accessibility_issues(decoded_points)
+
+        # Add custom warnings to the response object
+        route_data['custom_accessibility_warnings'] = custom_warnings
+
+        # --- Cache the successful result ---
+        clean_cache() # Ensure cache doesn't exceed max size
+        route_cache[cache_key] = route_data
+        print(f"Calculated and cached route. Cache size: {len(route_cache)}")
+
+        return jsonify(route_data)
+
+    except requests.exceptions.Timeout:
+        print("Error: Google Maps API request timed out.")
+        return jsonify({"error": "Routing service request timed out"}), 504 # Gateway Timeout
+    except requests.exceptions.RequestException as e:
+        print(f"Error calling Google Maps API: {e}")
+        return jsonify({"error": "Could not connect to routing service"}), 503 # Service Unavailable
+    except Exception as e:
+        app.logger.error(f"An unexpected error occurred during route calculation: {e}", exc_info=True)
+        return jsonify({"error": "Internal server error during route calculation"}), 500
 
 
 # --- Routes CRUD Endpoints ---
 
 @app.route('/api/routes', methods=['POST'])
 def save_route():
-    # Requires Authentication implementation first
+    """Saves a calculated route for the authenticated user."""
     user_id = get_current_user_id()
-    if not user_id:
-       return jsonify({"error": "Authentication required"}), 401
-
-    if not db: return jsonify({"error": "Database not available"}), 500
+    if not user_id: return jsonify({"error": "Authentication required"}), 401
+    if not db: return jsonify({"error": "Database service unavailable"}), 503
 
     data = request.get_json()
+    if not data: return jsonify({"error": "Request body required"}), 400
+
     route_name = data.get('name')
-    origin = data.get('origin') # Expected: {address: string, lat: float, lng: float}
-    destination = data.get('destination') # Expected: {address: string, lat: float, lng: float}
-    google_route_data = data.get('googleRouteData') # The JSON from Directions API
-    custom_warnings = data.get("customWarnings", []) # Optional
+    origin = data.get('origin')
+    destination = data.get('destination')
+    google_route_data = data.get('googleRouteData')
+    custom_warnings = data.get("customWarnings", [])
 
     # Basic Validation
     if not all([route_name, origin, destination, google_route_data]):
-         return jsonify({"error": "Missing required route data (name, origin, destination, googleRouteData)"}), 400
-    if not isinstance(origin, dict) or not isinstance(destination, dict):
-         return jsonify({"error": "Origin and Destination must be objects with address, lat, lng"}), 400
+         return jsonify({"error": "Missing required fields (name, origin, destination, googleRouteData)"}), 400
+    if not isinstance(origin, dict) or 'lat' not in origin or 'lng' not in origin or \
+       not isinstance(destination, dict) or 'lat' not in destination or 'lng' not in destination:
+         return jsonify({"error": "Origin and Destination must be objects with lat, lng"}), 400
 
     try:
-         # Consider storing only essential parts of googleRouteData if size is an issue
-         # e.g., overview_polyline, legs[0].steps, distance, duration
          route_doc = {
              "userId": user_id,
              "name": route_name,
              "origin": origin,
              "destination": destination,
-             "googleRouteData": google_route_data,
+             "googleRouteData": google_route_data, # Consider pruning this if too large
              "customWarnings": custom_warnings,
              "createdAt": datetime.utcnow()
          }
          result = db.routes.insert_one(route_doc)
          return jsonify({"message": "Route saved successfully", "routeId": str(result.inserted_id)}), 201
-
     except Exception as e:
-         print(f"Error saving route: {e}")
-         return jsonify({"error": "Failed to save route"}), 500
+         app.logger.error(f"Error saving route for user {user_id}: {e}", exc_info=True)
+         return jsonify({"error": "Failed to save route due to server error"}), 500
 
 @app.route('/api/routes', methods=['GET'])
 def get_saved_routes():
-     # Requires Authentication
-     user_id = get_current_user_id()
-     if not user_id: return jsonify({"error": "Authentication required"}), 401
+    """Retrieves saved routes (summary) for the authenticated user."""
+    user_id = get_current_user_id()
+    if not user_id: return jsonify({"error": "Authentication required"}), 401
+    if not db: return jsonify({"error": "Database service unavailable"}), 503
 
-     if not db: return jsonify({"error": "Database not available"}), 500
+    try:
+        user_routes = list(db.routes.find(
+            {"userId": user_id},
+            # Project only necessary fields for the list view
+            {"name": 1, "origin.address": 1, "destination.address": 1, "createdAt": 1}
+          ).sort("createdAt", -1)) # Sort by newest first
 
-     try:
-          # Find routes for the user, exclude large data field for list view
-          # Sort by creation date, newest first
-          user_routes = list(db.routes.find(
-              {"userId": user_id},
-              {"googleRouteData": 0, "customWarnings": 0} # Exclude potentially large fields
-            ).sort("createdAt", -1)) # Sort by newest first
-
-          # Convert ObjectId to string for JSON serialization
-          for route in user_routes:
-              route['_id'] = str(route['_id'])
-          return jsonify(user_routes)
-     except Exception as e:
-          print(f"Error fetching routes: {e}")
-          return jsonify({"error": "Failed to fetch saved routes"}), 500
+        for route in user_routes:
+            route['_id'] = str(route['_id']) # Convert ObjectId
+        return jsonify(user_routes)
+    except Exception as e:
+        app.logger.error(f"Error fetching routes for user {user_id}: {e}", exc_info=True)
+        return jsonify({"error": "Failed to fetch saved routes"}), 500
 
 @app.route('/api/routes/<route_id>', methods=['GET'])
 def get_single_route(route_id):
-    # Requires Authentication
+    """Retrieves full details for a specific saved route."""
     user_id = get_current_user_id()
     if not user_id: return jsonify({"error": "Authentication required"}), 401
-
-    if not db: return jsonify({"error": "Database not available"}), 500
+    if not db: return jsonify({"error": "Database service unavailable"}), 503
 
     try:
         obj_id = ObjectId(route_id)
@@ -153,26 +334,22 @@ def get_single_route(route_id):
         return jsonify({"error": "Invalid route ID format"}), 400
 
     try:
-        # Find the specific route only if it belongs to the current user
         route = db.routes.find_one({"_id": obj_id, "userId": user_id})
-
         if route:
-            route['_id'] = str(route['_id']) # Convert ObjectId to string
+            route['_id'] = str(route['_id'])
             return jsonify(route)
         else:
-            # Either route doesn't exist or doesn't belong to the user
             return jsonify({"error": "Route not found or access denied"}), 404
     except Exception as e:
-        print(f"Error fetching single route: {e}")
+        app.logger.error(f"Error fetching route {route_id} for user {user_id}: {e}", exc_info=True)
         return jsonify({"error": "Failed to fetch route details"}), 500
 
 @app.route('/api/routes/<route_id>', methods=['DELETE'])
 def delete_route(route_id):
-    # Requires Authentication
+    """Deletes a specific saved route."""
     user_id = get_current_user_id()
     if not user_id: return jsonify({"error": "Authentication required"}), 401
-
-    if not db: return jsonify({"error": "Database not available"}), 500
+    if not db: return jsonify({"error": "Database service unavailable"}), 503
 
     try:
         obj_id = ObjectId(route_id)
@@ -180,16 +357,13 @@ def delete_route(route_id):
         return jsonify({"error": "Invalid route ID format"}), 400
 
     try:
-        # Delete the route only if it belongs to the current user
         result = db.routes.delete_one({"_id": obj_id, "userId": user_id})
-
         if result.deleted_count == 1:
-            return jsonify({"message": "Route deleted successfully"}), 200 # Or 204 No Content
+            return jsonify({"message": "Route deleted successfully"}), 200
         else:
-            # Either route doesn't exist or doesn't belong to the user
             return jsonify({"error": "Route not found or access denied"}), 404
     except Exception as e:
-        print(f"Error deleting route: {e}")
+        app.logger.error(f"Error deleting route {route_id} for user {user_id}: {e}", exc_info=True)
         return jsonify({"error": "Failed to delete route"}), 500
 
 
@@ -197,195 +371,172 @@ def delete_route(route_id):
 
 @app.route('/api/user/preferences', methods=['GET'])
 def get_user_preferences():
-    # Requires Authentication
-    user_id = get_current_user_id() # This assumes you have a 'users' collection where user_id is the primary link
+    """Retrieves preferences for the authenticated user."""
+    user_id = get_current_user_id()
     if not user_id: return jsonify({"error": "Authentication required"}), 401
-
-    if not db: return jsonify({"error": "Database not available"}), 500
+    if not db: return jsonify({"error": "Database service unavailable"}), 503
 
     try:
-        # Assuming user doc identified by the same user_id used in routes
-        # Adjust field name if needed (e.g., authId instead of _id or userId)
-        user_data = db.users.find_one({"userId": user_id}, {"preferences": 1, "_id": 0}) # Project only preferences
-
+        # Assume 'users' collection exists and uses 'userId' field
+        user_data = db.users.find_one({"userId": user_id}, {"preferences": 1, "_id": 0})
         if user_data and 'preferences' in user_data:
             return jsonify(user_data['preferences'])
         else:
-            # Return default preferences if user/prefs don't exist
-            return jsonify({
-                "defaultMobility": "standard", # Or 'wheelchair' if that's your default
-                "voiceURI": None # Or a default voice URI string
-            })
+            # Return default preferences if not found
+            return jsonify({"defaultMobility": "standard", "voiceURI": None})
     except Exception as e:
-        print(f"Error fetching user preferences: {e}")
+        app.logger.error(f"Error fetching preferences for user {user_id}: {e}", exc_info=True)
         return jsonify({"error": "Failed to fetch user preferences"}), 500
 
 @app.route('/api/user/preferences', methods=['PUT'])
 def update_user_preferences():
-    # Requires Authentication
+    """Updates preferences for the authenticated user."""
     user_id = get_current_user_id()
     if not user_id: return jsonify({"error": "Authentication required"}), 401
-
-    if not db: return jsonify({"error": "Database not available"}), 500
+    if not db: return jsonify({"error": "Database service unavailable"}), 503
 
     data = request.get_json()
-    if not data:
-        return jsonify({"error": "Request body cannot be empty"}), 400
+    if not data: return jsonify({"error": "Request body required"}), 400
 
-    # Validate incoming preferences (add more checks as needed)
     allowed_mobility = ['standard', 'wheelchair']
-    new_prefs = {}
+    prefs_to_update = {}
+    valid_update = False
+
     if 'defaultMobility' in data:
         if data['defaultMobility'] not in allowed_mobility:
-            return jsonify({"error": f"Invalid defaultMobility value. Allowed: {allowed_mobility}"}), 400
-        new_prefs['defaultMobility'] = data['defaultMobility']
-    if 'voiceURI' in data:
-         # Basic check - could validate format further if needed
-        if data['voiceURI'] is not None and not isinstance(data['voiceURI'], str):
-            return jsonify({"error": "Invalid voiceURI value. Must be a string or null."}), 400
-        new_prefs['voiceURI'] = data['voiceURI']
+            return jsonify({"error": f"Invalid defaultMobility. Allowed: {allowed_mobility}"}), 400
+        prefs_to_update['preferences.defaultMobility'] = data['defaultMobility']
+        valid_update = True
 
-    if not new_prefs:
-         return jsonify({"error": "No valid preference fields provided"}), 400
+    if 'voiceURI' in data:
+        if data['voiceURI'] is not None and not isinstance(data['voiceURI'], str):
+            return jsonify({"error": "Invalid voiceURI. Must be a string or null."}), 400
+        prefs_to_update['preferences.voiceURI'] = data['voiceURI']
+        valid_update = True
+
+    if not valid_update:
+        return jsonify({"error": "No valid preference fields provided for update"}), 400
 
     try:
-        # Update the preferences field within the user document.
-        # Use upsert=True if you want to create the user document if it doesn't exist
-        # (though user creation should typically happen at signup).
+        # Use $set with dot notation to update specific fields in the subdocument
+        # Use upsert=True to create the user document/preferences field if it doesn't exist
         result = db.users.update_one(
-            {"userId": user_id}, # Filter: find the user document
-            {"$set": {"preferences": new_prefs}}, # Update: set the preferences field
-            upsert=False # Set to True ONLY if you want to create user doc here
+            {"userId": user_id},
+            {"$set": prefs_to_update},
+            upsert=True # Creates user doc and preferences field if missing
         )
 
-        if result.matched_count == 0 and result.upserted_id is None:
-            # User document wasn't found and upsert was false or failed
-             return jsonify({"error": "User not found to update preferences"}), 404
-
-        # Return the updated preferences (optional, requires another find_one)
+        # Fetch and return the updated preferences
         updated_user = db.users.find_one({"userId": user_id}, {"preferences": 1, "_id": 0})
         return jsonify(updated_user.get('preferences', {}))
 
     except Exception as e:
-        print(f"Error updating user preferences: {e}")
+        app.logger.error(f"Error updating preferences for user {user_id}: {e}", exc_info=True)
         return jsonify({"error": "Failed to update user preferences"}), 500
+
 
 # --- Accessibility Points CRUD Endpoints ---
 
 @app.route('/api/accessibility-points', methods=['POST'])
 def add_accessibility_point():
-    # Requires Authentication (and potentially authorization/roles)
+    """Adds a new accessibility point (requires auth)."""
     user_id = get_current_user_id()
     if not user_id: return jsonify({"error": "Authentication required"}), 401
-    # TODO: Add role check if only certain users can add points
-
-    if not db: return jsonify({"error": "Database not available"}), 500
+    # TODO: Add role check if needed
+    if not db: return jsonify({"error": "Database service unavailable"}), 503
 
     data = request.get_json()
     if not data: return jsonify({"error": "Request body required"}), 400
 
-    # Validate required fields
     lat = data.get('lat')
     lng = data.get('lng')
     point_type = data.get('type')
-    description = data.get('description', '') # Optional description
+    description = data.get('description', '')
 
     if lat is None or lng is None or not point_type:
         return jsonify({"error": "Missing required fields: lat, lng, type"}), 400
 
     try:
-        # Validate coordinates are numbers
-        lat = float(lat)
-        lng = float(lng)
+        lat = float(lat); lng = float(lng)
     except (ValueError, TypeError):
         return jsonify({"error": "Invalid coordinates: lat and lng must be numbers"}), 400
 
-    # TODO: Validate 'type' against a predefined list of allowed types
     allowed_types = ['ramp', 'elevator', 'hazard', 'accessible_restroom', 'missing_curb_cut', 'step_free_entrance']
     if point_type not in allowed_types:
-         return jsonify({"error": f"Invalid type. Allowed types: {allowed_types}"}), 400
+        return jsonify({"error": f"Invalid type. Allowed: {', '.join(allowed_types)}"}), 400
 
     try:
         point_doc = {
-            "location": {
-                "type": "Point",
-                "coordinates": [lng, lat] # GeoJSON format: [longitude, latitude]
-            },
+            "location": {"type": "Point", "coordinates": [lng, lat]},
             "type": point_type,
             "description": description,
-            "imageUrl": data.get('imageUrl'), # Optional
-            "source": data.get('source', 'user_submitted'), # Default source
-            "status": data.get('status', 'unverified'), # Default status - requires verification flow
+            "imageUrl": data.get('imageUrl'),
+            "source": data.get('source', 'user_submitted'),
+            "status": 'unverified', # New submissions start as unverified
             "submittedBy": user_id,
             "createdAt": datetime.utcnow(),
             "updatedAt": datetime.utcnow()
         }
-
         result = db.accessibility_points.insert_one(point_doc)
+        # Return the created point ID and message
         return jsonify({"message": "Accessibility point added successfully", "pointId": str(result.inserted_id)}), 201
-
     except Exception as e:
-        print(f"Error adding accessibility point: {e}")
+        app.logger.error(f"Error adding accessibility point submitted by {user_id}: {e}", exc_info=True)
         return jsonify({"error": "Failed to add accessibility point"}), 500
 
 @app.route('/api/accessibility-points', methods=['GET'])
 def get_accessibility_points():
-    # Publicly accessible endpoint to find nearby points? Or require auth? Decide based on use case.
-    if not db: return jsonify({"error": "Database not available"}), 500
-
-    lat_str = request.args.get('lat')
-    lng_str = request.args.get('lng')
-    radius_str = request.args.get('radius', '500') # Default radius in meters
-    point_type_filter = request.args.get('type') # Optional filter by type
-
-    if not lat_str or not lng_str:
-        return jsonify({"error": "Missing required query parameters: lat, lng"}), 400
+    """Retrieves accessibility points near a given location (public)."""
+    # Note: Decided to make this public for easier map display without login
+    if not db: return jsonify({"error": "Database service unavailable"}), 503
 
     try:
-        lat = float(lat_str)
-        lng = float(lng_str)
-        radius = int(radius_str)
-    except (ValueError, TypeError):
-        return jsonify({"error": "Invalid query parameters: lat, lng must be numbers, radius must be an integer"}), 400
+        lat = float(request.args.get('lat'))
+        lng = float(request.args.get('lng'))
+        radius = int(request.args.get('radius', '500')) # Default radius 500m
+    except (TypeError, ValueError, AttributeError):
+        return jsonify({"error": "Missing or invalid required query parameters: lat (number), lng (number)"}), 400
+
+    point_type_filter = request.args.get('type')
 
     try:
         query = {
             "location": {
                 "$nearSphere": {
-                    "$geometry": {
-                        "type": "Point",
-                        "coordinates": [lng, lat] # GeoJSON: [lng, lat]
-                    },
-                    "$maxDistance": radius # Radius in meters
+                    "$geometry": {"type": "Point", "coordinates": [lng, lat]},
+                    "$maxDistance": radius
                 }
-            }
+            },
+            # Only show verified points on the public map?
+            # "status": "verified"
         }
-        # Add optional type filter
         if point_type_filter:
-            # TODO: Validate point_type_filter against allowed_types?
             query["type"] = point_type_filter
 
-        # Only return verified points? Or filter by status? Add as needed:
-        # query["status"] = "verified"
+        # Project fields needed for map display
+        projection = {"_id": 1, "type": 1, "description": 1, "location.coordinates": 1}
+        points = list(db.accessibility_points.find(query, projection).limit(200)) # Limit results
 
-        # Limit number of results? Add .limit(X)
-        points = list(db.accessibility_points.find(query, {"_id": 0})) # Exclude _id often not needed for map display
+        # Format for easier frontend consumption
+        formatted_points = []
+        for point in points:
+            formatted_points.append({
+                "id": str(point['_id']),
+                "type": point.get("type"),
+                "description": point.get("description"),
+                "lat": point.get("location", {}).get("coordinates", [None, None])[1],
+                "lng": point.get("location", {}).get("coordinates", [None, None])[0],
+            })
 
-        # Note: _id was excluded above. If needed, uncomment the conversion loop.
-        # for point in points:
-        #     point['_id'] = str(point['_id'])
-
-        return jsonify(points)
-
+        return jsonify(formatted_points)
     except Exception as e:
-        print(f"Error fetching accessibility points: {e}")
+        app.logger.error(f"Error fetching accessibility points near ({lat}, {lng}): {e}", exc_info=True)
         return jsonify({"error": "Failed to fetch accessibility points"}), 500
-
 
 @app.route('/api/accessibility-points/<point_id>', methods=['GET'])
 def get_single_accessibility_point(point_id):
-    # Public or authenticated? Decide based on use case.
-    if not db: return jsonify({"error": "Database not available"}), 500
+    """Retrieves details for a single accessibility point (public)."""
+    if not db: return jsonify({"error": "Database service unavailable"}), 503
 
     try:
         obj_id = ObjectId(point_id)
@@ -393,54 +544,54 @@ def get_single_accessibility_point(point_id):
         return jsonify({"error": "Invalid point ID format"}), 400
 
     try:
-        point = db.accessibility_points.find_one({"_id": obj_id})
-
+        # Project fields, potentially excluding submitter info for public view
+        projection = {"submittedBy": 0}
+        point = db.accessibility_points.find_one({"_id": obj_id}, projection)
         if point:
-            point['_id'] = str(point['_id']) # Convert ObjectId to string
-            # Convert location coordinates back if needed, though often frontend handles GeoJSON directly
-            # point['lat'] = point['location']['coordinates'][1]
-            # point['lng'] = point['location']['coordinates'][0]
-            # del point['location'] # Remove original GeoJSON if sending lat/lng separately
+            point['_id'] = str(point['_id']) # Convert ObjectId
             return jsonify(point)
         else:
             return jsonify({"error": "Accessibility point not found"}), 404
     except Exception as e:
-        print(f"Error fetching single accessibility point: {e}")
+        app.logger.error(f"Error fetching accessibility point {point_id}: {e}", exc_info=True)
         return jsonify({"error": "Failed to fetch accessibility point details"}), 500
 
-# --- TODO: Add PUT and DELETE for /api/accessibility-points/<point_id> ---
-# These would require stronger authorization checks (e.g., only admin or original submitter can modify/delete)
-# Example Signature for PUT:
-# @app.route('/api/accessibility-points/<point_id>', methods=['PUT'])
-# def update_accessibility_point(point_id):
-#     # Check auth/roles
-#     # Get point_id, convert to ObjectId
-#     # Get update data from request.json
-#     # Validate data
-#     # db.accessibility_points.update_one(...) with $set, update updatedAt timestamp
-#     # Return updated point or success message
 
-# Example Signature for DELETE:
-# @app.route('/api/accessibility-points/<point_id>', methods=['DELETE'])
-# def delete_accessibility_point(point_id):
-#     # Check auth/roles
-#     # Get point_id, convert to ObjectId
-#     # db.accessibility_points.delete_one(...)
-#     # Return success/no content or not found/forbidden
+# ===========================================
+#             Error Handlers
+# ===========================================
 
-
-# --- Error Handling (Keep as is) ---
 @app.errorhandler(404)
-def not_found(error):
-    # ...
-    pass # Keep existing code
+def not_found_error(error):
+    """Handles 404 Not Found errors."""
+    return jsonify({"error": "Not Found", "message": "The requested URL was not found on the server."}), 404
 
 @app.errorhandler(500)
-def server_error(error):
-    # ...
-    pass # Keep existing code
+def internal_error(error):
+    """Handles 500 Internal Server errors."""
+    # Log the actual error to the server logs
+    app.logger.error(f"Internal Server Error: {error}", exc_info=True)
+    return jsonify({"error": "Internal Server Error", "message": "An unexpected error occurred."}), 500
 
-# --- Main Execution (Keep as is) ---
+@app.errorhandler(Exception)
+def handle_generic_exception(error):
+    """Handles any other unhandled exceptions."""
+    # Log the actual error
+    app.logger.error(f"Unhandled Exception: {error}", exc_info=True)
+    return jsonify({"error": "Server Error", "message": "An unexpected application error occurred."}), 500
+
+
+# ===========================================
+#             Main Execution
+# ===========================================
+
 if __name__ == '__main__':
-    # ...
-    pass # Keep existing code
+    # Get port from environment variable or default to 5001 for local dev
+    port = int(os.environ.get('PORT', 5001))
+    # Get debug mode from environment variable (defaults to False)
+    debug_mode = os.getenv("FLASK_DEBUG", "False").lower() == "true"
+
+    print(f"Starting Flask server on host 0.0.0.0, port {port}, debug={debug_mode}")
+    # Run the Flask development server
+    # Gunicorn will be used in production via Procfile, this is for local 'python app.py'
+    app.run(host='0.0.0.0', port=port, debug=debug_mode)
