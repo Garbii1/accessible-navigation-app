@@ -62,6 +62,7 @@ def get_current_user_id():
 @app.route('/')
 def index():
     # ...
+    return jsonify({"message": "Welcome to the Accessible Navigation API!"})
     pass # Keep existing code
 
 # --- Route Calculation Endpoint (Keep as is) ---
