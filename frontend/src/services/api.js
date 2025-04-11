@@ -1,67 +1,122 @@
 // src/services/api.js
 
-// Use environment variable for backend URL, fallback to relative path for proxy/same-origin setups
-// Ensure VITE_API_BASE_URL is set in your .env files (e.g., http://localhost:5001 for dev, https://your-backend.onrender.com for prod)
-const API_BASE_URL = import.meta.env.VITE_API_BASE_URL ? `${import.meta.env.VITE_API_BASE_URL}/api` : '/api';
+/**
+ * Centralized API service module for interacting with the backend.
+ */
 
-// --- Helper for handling responses ---
-// Reduces repetition in error handling
+// --- Configuration ---
+
+// Construct the Base URL for the API endpoint.
+// Reads the backend origin from the Vite environment variable VITE_API_BASE_URL.
+// Appends the '/api' prefix which is expected by the backend routes and CORS configuration.
+// Provides a fallback to '/api' for same-origin requests or if the env var is not set.
+const backendOrigin = import.meta.env.VITE_API_BASE_URL || '';
+const API_BASE_URL = backendOrigin ? `${backendOrigin}/api` : '/api';
+
+console.log(`API Base URL configured to: ${API_BASE_URL}`); // Log for debugging
+
+// --- Helper Functions ---
+
+/**
+ * Handles the response from a fetch request.
+ * Checks for errors, parses JSON, and throws specific errors.
+ * @param {Response} response - The response object from fetch.
+ * @returns {Promise<any>} - The parsed JSON data or null for 204 responses.
+ * @throws {Error} - Throws an error with backend message or HTTP status.
+ */
 async function handleResponse(response) {
   if (!response.ok) {
     let errorData;
+    const contentType = response.headers.get('content-type');
     try {
-      // Try to parse error message from backend JSON response
-      errorData = await response.json();
+      // Try to parse error message from backend ONLY if it's JSON
+      if (contentType && contentType.includes('application/json')) {
+         errorData = await response.json();
+      }
     } catch (e) {
-      // If response is not JSON or body is empty
-      throw new Error(`HTTP error! Status: ${response.status} - ${response.statusText}`);
+      // Ignore JSON parsing errors if response is not JSON
+      console.error("Failed to parse error response as JSON:", e);
     }
     // Throw error message from backend if available, otherwise generic HTTP error
-    throw new Error(errorData?.error || `HTTP error! Status: ${response.status}`);
+    const errorMessage = errorData?.error || errorData?.message || `HTTP error! Status: ${response.status} - ${response.statusText}`;
+    console.error('API request failed:', errorMessage, 'Status:', response.status);
+    throw new Error(errorMessage);
   }
+
   // Handle cases like 204 No Content where there might not be a body
   if (response.status === 204) {
-     return null; // Or return true, depending on what the caller expects
+     console.log('API request successful with Status 204 No Content.');
+     return null; // Indicate success with no content
   }
-  // Otherwise, parse the JSON body
-  return await response.json();
+
+  // Otherwise, parse and return the JSON body
+  try {
+     const data = await response.json();
+     return data;
+  } catch (e) {
+      console.error("Failed to parse success response as JSON:", e);
+      throw new Error("Received invalid JSON response from server.");
+  }
 }
 
-// --- Authentication Header (Placeholder) ---
-// In a real app, you'd get the token from your auth state management (e.g., localStorage, context)
+/**
+ * Placeholder function to get Authentication headers.
+ * Replace with your actual logic to retrieve and format the auth token.
+ * @returns {Object} - Headers object containing Authorization or empty object.
+ */
 const getAuthHeader = () => {
-    // const token = localStorage.getItem('authToken'); // Example: Retrieve token
-    // if (token) {
-    //     return { 'Authorization': `Bearer ${token}` };
-    // }
+    // Example: Retrieve token from localStorage or state management
+    // const token = localStorage.getItem('authToken');
+    const token = null; // Replace with actual token retrieval
+
+    if (token) {
+        return { 'Authorization': `Bearer ${token}` };
+    }
+    // console.warn("No auth token found for API request."); // Uncomment if auth is expected
     return {}; // Return empty object if no token
 };
 
-// --- Route Calculation ---
+
+// --- API Function Definitions ---
+
+/**
+ * Fetches route calculation results from the backend.
+ * @param {string | {lat: number, lng: number}} origin - Origin address string or coordinates.
+ * @param {string | {lat: number, lng: number}} destination - Destination address string or coordinates.
+ * @param {object} preferences - User preferences (avoidStairs, mode, etc.).
+ * @returns {Promise<object>} - The Google Directions API response object from the backend.
+ */
 export const fetchRoute = async (origin, destination, preferences) => {
+  const endpoint = `${API_BASE_URL}/route`;
+  console.log(`Fetching route from ${endpoint}`);
   try {
-    const response = await fetch(`${API_BASE_URL}/route`, {
+    const response = await fetch(endpoint, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
-        // Add Auth header if route calculation requires login? (unlikely for this endpoint)
+        // Add Auth header if route calculation ever requires login?
         // ...getAuthHeader(),
       },
       body: JSON.stringify({ origin, destination, preferences }),
     });
-    return await handleResponse(response); // Use helper
+    return await handleResponse(response);
   } catch (error) {
-    console.error("Error fetching route:", error);
-    throw error; // Re-throw for component-level handling
+    console.error(`Error fetching route from ${endpoint}:`, error);
+    // Re-throw for component-level error handling (e.g., updating UI state)
+    throw error;
   }
 };
 
-// --- Saved Routes CRUD ---
-
+/**
+ * Saves a calculated route for the current user.
+ * @param {object} routeData - Data required by the backend { name, origin, destination, googleRouteData, customWarnings? }.
+ * @returns {Promise<object>} - Success message and new route ID { message, routeId }.
+ */
 export const saveRoute = async (routeData) => {
-  // routeData expected: { name, origin, destination, googleRouteData, customWarnings? }
+  const endpoint = `${API_BASE_URL}/routes`;
+  console.log(`Saving route to ${endpoint}`);
   try {
-    const response = await fetch(`${API_BASE_URL}/routes`, {
+    const response = await fetch(endpoint, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
@@ -69,81 +124,109 @@ export const saveRoute = async (routeData) => {
       },
       body: JSON.stringify(routeData),
     });
-    return await handleResponse(response); // Returns { message, routeId }
+    return await handleResponse(response);
   } catch (error) {
-    console.error("Error saving route:", error);
+    console.error(`Error saving route to ${endpoint}:`, error);
     throw error;
   }
 };
 
+/**
+ * Retrieves a list of saved routes (summary) for the current user.
+ * @returns {Promise<Array<object>>} - Array of saved route summary objects.
+ */
 export const getSavedRoutes = async () => {
+  const endpoint = `${API_BASE_URL}/routes`;
+  console.log(`Fetching saved routes from ${endpoint}`);
   try {
-    const response = await fetch(`${API_BASE_URL}/routes`, {
+    const response = await fetch(endpoint, {
       method: 'GET',
       headers: {
         ...getAuthHeader(), // Authentication required
       },
     });
-    return await handleResponse(response); // Returns array of route objects
+    return await handleResponse(response);
   } catch (error) {
-    console.error("Error fetching saved routes:", error);
+    console.error(`Error fetching saved routes from ${endpoint}:`, error);
     throw error;
   }
 };
 
+/**
+ * Retrieves full details for a single saved route.
+ * @param {string} routeId - The ID of the route to fetch.
+ * @returns {Promise<object>} - The full route object.
+ */
 export const getSingleRoute = async (routeId) => {
+  const endpoint = `${API_BASE_URL}/routes/${routeId}`;
+  console.log(`Fetching single route from ${endpoint}`);
   try {
-    const response = await fetch(`${API_BASE_URL}/routes/${routeId}`, {
+    const response = await fetch(endpoint, {
       method: 'GET',
       headers: {
         ...getAuthHeader(), // Authentication required
       },
     });
-    return await handleResponse(response); // Returns single full route object
+    return await handleResponse(response);
   } catch (error) {
-    console.error(`Error fetching route ${routeId}:`, error);
+    console.error(`Error fetching route ${routeId} from ${endpoint}:`, error);
     throw error;
   }
 };
 
+/**
+ * Deletes a saved route for the current user.
+ * @param {string} routeId - The ID of the route to delete.
+ * @returns {Promise<object|null>} - Success message { message } or null if 204.
+ */
 export const deleteRoute = async (routeId) => {
+  const endpoint = `${API_BASE_URL}/routes/${routeId}`;
+  console.log(`Deleting route at ${endpoint}`);
   try {
-    const response = await fetch(`${API_BASE_URL}/routes/${routeId}`, {
+    const response = await fetch(endpoint, {
       method: 'DELETE',
       headers: {
         ...getAuthHeader(), // Authentication required
       },
     });
-    // Use handleResponse, it correctly handles 204 or JSON response
-    return await handleResponse(response); // Returns { message } on success or null/error
+    return await handleResponse(response);
   } catch (error) {
-    console.error(`Error deleting route ${routeId}:`, error);
+    console.error(`Error deleting route ${routeId} at ${endpoint}:`, error);
     throw error;
   }
 };
 
-
-// --- User Preferences CRUD ---
-
+/**
+ * Retrieves the preferences for the current user.
+ * @returns {Promise<object>} - The user's preferences object.
+ */
 export const getUserPreferences = async () => {
+  const endpoint = `${API_BASE_URL}/user/preferences`;
+  console.log(`Fetching user preferences from ${endpoint}`);
   try {
-    const response = await fetch(`${API_BASE_URL}/user/preferences`, {
+    const response = await fetch(endpoint, {
       method: 'GET',
       headers: {
         ...getAuthHeader(), // Authentication required
       },
     });
-    return await handleResponse(response); // Returns preferences object
+    return await handleResponse(response);
   } catch (error) {
-    console.error("Error fetching user preferences:", error);
+    console.error(`Error fetching user preferences from ${endpoint}:`, error);
     throw error;
   }
 };
 
+/**
+ * Updates the preferences for the current user.
+ * @param {object} preferences - The preference fields to update { defaultMobility?, voiceURI? }.
+ * @returns {Promise<object>} - The updated preferences object.
+ */
 export const updateUserPreferences = async (preferences) => {
-  // preferences expected: { defaultMobility?, voiceURI? }
+  const endpoint = `${API_BASE_URL}/user/preferences`;
+  console.log(`Updating user preferences at ${endpoint}`);
   try {
-    const response = await fetch(`${API_BASE_URL}/user/preferences`, {
+    const response = await fetch(endpoint, {
       method: 'PUT',
       headers: {
         'Content-Type': 'application/json',
@@ -151,20 +234,23 @@ export const updateUserPreferences = async (preferences) => {
       },
       body: JSON.stringify(preferences),
     });
-    return await handleResponse(response); // Returns updated preferences object
+    return await handleResponse(response);
   } catch (error) {
-    console.error("Error updating user preferences:", error);
+    console.error(`Error updating user preferences at ${endpoint}:`, error);
     throw error;
   }
 };
 
-
-// --- Accessibility Points CRUD ---
-
+/**
+ * Adds a new accessibility point.
+ * @param {object} pointData - Data for the new point { lat, lng, type, description?, imageUrl?, source? }.
+ * @returns {Promise<object>} - Success message and new point ID { message, pointId }.
+ */
 export const addAccessibilityPoint = async (pointData) => {
-  // pointData expected: { lat, lng, type, description?, imageUrl?, source? }
+  const endpoint = `${API_BASE_URL}/accessibility-points`;
+  console.log(`Adding accessibility point at ${endpoint}`);
   try {
-    const response = await fetch(`${API_BASE_URL}/accessibility-points`, {
+    const response = await fetch(endpoint, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
@@ -172,51 +258,64 @@ export const addAccessibilityPoint = async (pointData) => {
       },
       body: JSON.stringify(pointData),
     });
-    return await handleResponse(response); // Returns { message, pointId }
+    return await handleResponse(response);
   } catch (error) {
-    console.error("Error adding accessibility point:", error);
+    console.error(`Error adding accessibility point at ${endpoint}:`, error);
     throw error;
   }
 };
 
+/**
+ * Retrieves accessibility points near a given location.
+ * @param {object} params - Query parameters { lat, lng, radius?, type? }.
+ * @returns {Promise<Array<object>>} - Array of nearby accessibility point objects.
+ */
 export const getAccessibilityPoints = async (params) => {
-  // params expected: { lat, lng, radius?, type? }
-  try {
-    // Construct query string
-    const queryParams = new URLSearchParams({
-        lat: params.lat,
-        lng: params.lng,
-    });
-    if (params.radius) queryParams.append('radius', params.radius);
-    if (params.type) queryParams.append('type', params.type);
+  // Construct query string safely
+  const queryParams = new URLSearchParams({
+      lat: params.lat, // Required
+      lng: params.lng, // Required
+  });
+  if (params.radius) queryParams.append('radius', params.radius);
+  if (params.type) queryParams.append('type', params.type);
 
-    const response = await fetch(`${API_BASE_URL}/accessibility-points?${queryParams.toString()}`, {
+  const endpoint = `${API_BASE_URL}/accessibility-points?${queryParams.toString()}`;
+  console.log(`Fetching accessibility points from ${endpoint}`);
+  try {
+    const response = await fetch(endpoint, {
       method: 'GET',
-      // Decide if auth is needed for querying points. If public, remove getAuthHeader().
+      // Decide if auth is needed for querying points (currently public in backend)
       // headers: { ...getAuthHeader() },
     });
-    return await handleResponse(response); // Returns array of point objects
+    // Backend formats the response, just handle it
+    return await handleResponse(response);
   } catch (error) {
-    console.error("Error fetching accessibility points:", error);
+    console.error(`Error fetching accessibility points from ${endpoint}:`, error);
     throw error;
   }
 };
 
+/**
+ * Retrieves details for a single accessibility point.
+ * @param {string} pointId - The ID of the accessibility point.
+ * @returns {Promise<object>} - The detailed accessibility point object.
+ */
 export const getSingleAccessibilityPoint = async (pointId) => {
+  const endpoint = `${API_BASE_URL}/accessibility-points/${pointId}`;
+  console.log(`Fetching single accessibility point from ${endpoint}`);
   try {
-    const response = await fetch(`${API_BASE_URL}/accessibility-points/${pointId}`, {
+    const response = await fetch(endpoint, {
       method: 'GET',
-      // Decide if auth is needed for getting single point details.
+      // Decide if auth is needed for getting single point details (currently public)
       // headers: { ...getAuthHeader() },
     });
-    return await handleResponse(response); // Returns single point object
+    return await handleResponse(response);
   } catch (error) {
-    console.error(`Error fetching accessibility point ${pointId}:`, error);
+    console.error(`Error fetching accessibility point ${pointId} from ${endpoint}:`, error);
     throw error;
   }
 };
 
-// --- TODO (Optional based on backend): Add functions for ---
-// - updateAccessibilityPoint(pointId, updateData) (PUT)
-// - deleteAccessibilityPoint(pointId) (DELETE)
-// These would require authentication and likely authorization checks.
+// --- TODO ---
+// Add functions for PUT/DELETE on accessibility points if implementing update/delete features.
+// Ensure robust authentication is implemented and integrated via getAuthHeader.
