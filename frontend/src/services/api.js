@@ -2,7 +2,7 @@
 
 // Use environment variable for backend URL, fallback to relative path for proxy/same-origin setups
 // Ensure VITE_API_BASE_URL is set in your .env files (e.g., http://localhost:5001 for dev, https://your-backend.onrender.com for prod)
-const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || '/api';
+const API_BASE_URL = import.meta.env.VITE_API_BASE_URL ? `${import.meta.env.VITE_API_BASE_URL}/api` : '/api';
 
 // --- Helper for handling responses ---
 // Reduces repetition in error handling
