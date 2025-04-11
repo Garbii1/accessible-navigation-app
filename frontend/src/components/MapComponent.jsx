@@ -30,7 +30,7 @@ function MapComponent({ routeResponse }) {
   const { isLoaded, loadError } = useJsApiLoader({
     id: 'google-map-script',
     googleMapsApiKey: import.meta.env.VITE_GOOGLE_MAPS_API_KEY,
-    libraries: ['places', 'directions']
+    libraries: ['places'] //, 'directions']
   });
 
   const [map, setMap] = useState(null);
