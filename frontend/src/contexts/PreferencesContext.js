@@ -1,114 +1,144 @@
+// src/contexts/PreferencesContext.js
 import React, { createContext, useState, useContext, useEffect, useCallback, useMemo } from 'react';
-// Import API service functions (assuming they exist)
-// import { getUserPreferences, updateUserPreferences } from '../services/api';
-// Import auth context if preferences are user-specific
-// import { useAuth } from './AuthContext';
+// Import REAL API functions - Make sure these exist and work with tokens
+import { getUserPreferences, updateUserPreferences } from '../services/api';
+// Import Clerk hook to get user ID and token
+import { useAuth } from '@clerk/clerk-react';
 
-// --- Placeholder API calls ---
-const preferencesService = {
-    load: async (userId) => {
-        console.log(`Simulating load preferences for user ${userId}`);
-        await new Promise(res => setTimeout(res, 400));
-        // Simulate loading saved prefs or returning defaults
-        const saved = localStorage.getItem(`prefs_${userId}`);
-        if (saved) return JSON.parse(saved);
-        return { defaultMobility: 'standard', voiceURI: null, avoidStairs: true };
-    },
-    save: async (userId, prefs) => {
-        console.log(`Simulating save preferences for user ${userId}:`, prefs);
-        await new Promise(res => setTimeout(res, 300));
-        // Simulate saving (e.g., to local storage for demo)
-        localStorage.setItem(`prefs_${userId}`, JSON.stringify(prefs));
-        // Replace with actual API call: PUT /api/user/preferences
-        return true;
-    }
-};
-// --- End Placeholder ---
-
-
-// Create the context
+// --- Create the Context ---
+// The initial value is null, consumers must be descendants of the Provider.
 const PreferencesContext = createContext(null);
 
-// Default preferences
+// --- Default Preferences Structure ---
+// Define the shape and default values for user preferences.
 const defaultPreferences = {
   defaultMobility: 'standard', // 'standard' or 'wheelchair'
-  voiceURI: null, // Store selected voice URI string
-  avoidStairs: true, // Example walking preference
-  // Add other preferences as needed
+  voiceURI: null,             // Store selected voice URI string (or null for browser default)
+  avoidStairs: true,          // Walking routes: try to avoid stairs
+  wheelchairAccessibleTransit: true, // Transit routes: request accessible ones
+  mode: 'walking',            // Default travel mode ('walking', 'transit', 'driving'?)
+  // Add other potential preferences here:
+  // e.g., preferredUnits: 'metric' / 'imperial'
+  // e.g., mapType: 'roadmap' / 'satellite'
 };
 
-// Provider component
+// --- Preferences Provider Component ---
+// This component wraps parts of the app that need access to preferences.
+// It fetches, stores, and updates user preferences.
 export function PreferencesProvider({ children }) {
+  // State for the actual preferences object
   const [preferences, setPreferences] = useState(defaultPreferences);
+  // State to track loading status
   const [isLoading, setIsLoading] = useState(true);
+  // State to store errors during load/save operations
   const [error, setError] = useState(null);
-  // const { user, isAuthenticated } = useAuth(); // Get user from AuthContext if prefs are user-specific
+  // Get authentication state from Clerk using its hook
+  const { userId, getToken, isSignedIn, isLoaded: isAuthLoaded } = useAuth();
 
-  // Placeholder user ID - replace with actual user ID from auth context
-  const userId = 'temp_user_id_for_testing'; // Replace with user?.id;
-
-  // Load preferences on mount or when user changes
-  useEffect(() => {
-    const loadPrefs = async () => {
-      // if (!isAuthenticated || !userId) { // Only load if authenticated
-      //   setPreferences(defaultPreferences);
-      //   setIsLoading(false);
-      //   return;
-      // }
-      setIsLoading(true);
-      setError(null);
-      try {
-        const loadedPrefs = await preferencesService.load(userId);
-        setPreferences(prev => ({ ...defaultPreferences, ...prev, ...loadedPrefs })); // Merge with defaults
-      } catch (err) {
-        console.error("Failed to load preferences:", err);
-        setError("Could not load preferences.");
-        setPreferences(defaultPreferences); // Fallback to defaults
-      } finally {
-        setIsLoading(false);
-      }
-    };
-    loadPrefs();
-  }, [userId]); // Reload if userId changes (i.e., user logs in/out)
-
-  // Function to update and save preferences
-  const updatePreferences = useCallback(async (newPrefs) => {
-    // if (!isAuthenticated || !userId) {
-    //    console.warn("Cannot save preferences, user not authenticated.");
-    //    return; // Don't save if not logged in
-    // }
-    // Optimistic UI update
-    setPreferences(prev => ({ ...prev, ...newPrefs }));
-    setError(null); // Clear previous errors on new attempt
-    try {
-        await preferencesService.save(userId, { ...preferences, ...newPrefs }); // Save merged state
-        console.log("Preferences saved successfully.");
-    } catch (err) {
-        console.error("Failed to save preferences:", err);
-        setError("Failed to save preferences. Changes may not persist.");
-        // Optionally revert optimistic update here if needed
-        // loadPrefs(); // Re-fetch to revert?
+  // --- Function to Load Preferences from Backend ---
+  const loadPrefs = useCallback(async () => {
+    // Only attempt to load if Clerk has determined auth status AND user is signed in
+    if (!isSignedIn || !userId) {
+      setPreferences(defaultPreferences); // Reset to defaults if not signed in
+      setIsLoading(false); // No longer loading if not signed in
+      setError(null); // Clear any previous errors
+      console.log("PreferencesContext: User not signed in, using default preferences.");
+      return;
     }
-  }, [userId, preferences]); // Include dependencies
 
-  // Memoize the context value
+    setIsLoading(true);
+    setError(null);
+    console.log(`PreferencesContext: Attempting to load preferences for user ${userId}`);
+
+    try {
+      const token = await getToken(); // Get the session token from Clerk
+      if (!token) {
+          // This case might happen briefly during sign-in/out transitions
+          throw new Error("Authentication token not available.");
+      }
+
+      const loadedPrefs = await getUserPreferences(token); // Call the API service function
+      // Merge fetched preferences with defaults to ensure all keys exist
+      // Fetched preferences override defaults.
+      setPreferences(prev => ({ ...defaultPreferences, ...prev, ...loadedPrefs }));
+      console.log("PreferencesContext: Preferences loaded successfully:", loadedPrefs);
+    } catch (err) {
+      console.error("PreferencesContext: Failed to load preferences:", err);
+      setError(`Could not load preferences: ${err.message}. Using defaults.`);
+      setPreferences(defaultPreferences); // Fallback to defaults on error
+    } finally {
+      setIsLoading(false);
+    }
+    // Dependencies: Trigger reload if user ID changes or if getToken becomes available/changes
+  }, [userId, isSignedIn, getToken]);
+
+  // --- Effect to Load Preferences ---
+  // Runs when auth status is determined or when the load function itself changes (rarely)
+  useEffect(() => {
+    if (isAuthLoaded) { // Ensure Clerk is ready before trying to load
+      loadPrefs();
+    }
+  }, [isAuthLoaded, loadPrefs]); // Depend on auth load status and the memoized load function
+
+  // --- Function to Update and Save Preferences ---
+  const updatePreferences = useCallback(async (newPrefs) => {
+    // Prevent saving if not authenticated
+    if (!isSignedIn || !userId) {
+       console.warn("PreferencesContext: Cannot save preferences, user not authenticated.");
+       setError("You must be logged in to save preferences.");
+       // Optionally, revert the local state change if you used optimistic updates differently
+       return;
+    }
+
+    // Create the next state optimistically for immediate UI feedback
+    const updatedPrefs = { ...preferences, ...newPrefs };
+    setPreferences(updatedPrefs);
+    setError(null); // Clear previous errors on a new save attempt
+
+    console.log(`PreferencesContext: Attempting to save preferences for user ${userId}:`, updatedPrefs);
+
+    try {
+        const token = await getToken(); // Get fresh token for saving
+        if (!token) throw new Error("Authentication token unavailable for saving.");
+
+        // Call the API to persist the changes
+        await updateUserPreferences(updatedPrefs, token); // Pass the *entire* updated object
+        console.log("PreferencesContext: Preferences saved successfully.");
+    } catch (err) {
+        console.error("PreferencesContext: Failed to save preferences:", err);
+        setError(`Failed to save preferences: ${err.message}. Changes might not persist.`);
+        // Optional: Revert the optimistic update by reloading saved prefs
+        // Consider adding a delay or specific UI indication for the revert
+        // loadPrefs();
+        // Or simply notify the user the save failed.
+    }
+    // Dependencies: Include necessary state/functions used inside
+  }, [userId, preferences, isSignedIn, getToken]); // Removed loadPrefs dependency if not reverting
+
+  // --- Memoize the Context Value ---
+  // Prevents consumers from re-rendering unnecessarily if the context object identity changes
+  // but the actual values they care about haven't.
   const value = useMemo(() => ({
     preferences,
     isLoading,
     error,
     updatePreferences,
-  }), [preferences, isLoading, error, updatePreferences]);
+    reloadPreferences: loadPrefs, // Provide a way for consumers to manually reload
+  }), [preferences, isLoading, error, updatePreferences, loadPrefs]); // Include all returned values/functions
 
+  // --- Provide the Context ---
   return (
     <PreferencesContext.Provider value={value}>
       {children}
-    </PreferencesContext.Provider>
-  );
-}
+    </PreferencesContext.Provider> // Ensure closing tag is correct
+  ); // Ensure closing parenthesis for return is correct
+} // Ensure closing brace for function is correct
 
-// Custom hook to use the preferences context
+// --- Custom Hook for Consuming the Context ---
+// Provides a cleaner way for components to access the context values.
 export function usePreferences() {
   const context = useContext(PreferencesContext);
+  // Ensure the hook is used within a provider
   if (context === null) {
     throw new Error('usePreferences must be used within a PreferencesProvider');
   }
