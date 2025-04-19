@@ -134,8 +134,8 @@ export function PreferencesProvider({ children }) {
     <PreferencesContext.Provider value={value}>
       {children}
     </PreferencesContext.Provider>
-  ); // Closing parenthesis for the return statement
-} // Closing brace for the PreferencesProvider function component
+  ); 
+} 
 
 // --- Custom Hook for Consuming the Context ---
 // Provides a convenient and safe way for components to access the preferences context.
