@@ -1,178 +1,186 @@
 // src/App.jsx
+import React, { useState, useEffect } from 'react';
+import { Routes, Route, Link, Outlet, useLocation } from 'react-router-dom';
+import { SignedIn, SignedOut, UserButton, useAuth, SignInButton, SignUpButton, RedirectToSignIn } from '@clerk/clerk-react';
 
-import React, { useState, useEffect, useCallback } from 'react';
+// --- Import Pages ---
+import HomePage from './pages/HomePage';
+import SavedRoutesPage from './pages/SavedRoutesPage';
+import PreferencesPage from './pages/PreferencesPage';
+import UserProfilePage from './pages/UserProfilePage'; // For Clerk's <UserProfile />
 
-// --- Import Components ---
-// Make sure these files exist in ./components/ and export the components correctly
-import MapComponent from './components/MapComponent';
-import RouteForm from './components/RouteForm';
-import DirectionsPanel from './components/DirectionsPanel';
-import AudioGuidance from './components/AudioGuidance';
+// --- Hamburger Menu Component ---
+function HamburgerMenu() {
+    const [isOpen, setIsOpen] = useState(false);
+    const { isSignedIn } = useAuth();
+    const location = useLocation(); // To close menu on navigation
 
-// --- Import API Service ---
-// Make sure this file exists in ./services/ and exports the function correctly
-import { fetchRoute } from './services/api';
+    const toggleMenu = (e) => {
+        e.stopPropagation(); // Prevent background click when opening
+        setIsOpen(!isOpen);
+    };
+    const closeMenu = () => setIsOpen(false);
 
-// --- Main Application Component ---
-function App() {
-  // --- State Variables ---
-  const [routeResponse, setRouteResponse] = useState(null); // Stores the response from Google Directions API
-  const [isLoading, setIsLoading] = useState(false); // Tracks if route calculation is in progress
-  const [error, setError] = useState(null); // Stores any errors during route calculation
-  const [currentStep, setCurrentStep] = useState(null); // Tracks the currently selected step for audio guidance
+    // Close menu when route changes
+    useEffect(() => {
+        closeMenu();
+    }, [location.pathname]);
 
-  // User preferences state (can be loaded from localStorage/backend later)
-  const [preferences, setPreferences] = useState({
-    avoidStairs: true,
-    wheelchairAccessibleTransit: true,
-    mode: 'walking', // Default travel mode
-  });
+    return (
+        <div className="relative z-50">
+            {/* Hamburger Button */}
+            <button
+                onClick={toggleMenu}
+                className="p-2 rounded-full text-gray-600 hover:text-gray-900 hover:bg-gray-100 focus:outline-none focus:ring-2 focus:ring-inset focus:ring-indigo-500"
+                aria-label="Open main menu"
+                aria-controls="main-menu"
+                aria-expanded={isOpen}
+            >
+                {/* Heroicon: menu */}
+                <svg className="h-6 w-6" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke="currentColor" aria-hidden="true">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 6h16M4 12h16M4 18h16" />
+                </svg>
+            </button>
 
-  // --- API Call Logic ---
-  const handleRouteRequest = useCallback(async (origin, destination) => {
-    console.log("Requesting route:", { origin, destination, preferences });
-    setIsLoading(true);
-    setError(null);
-    setRouteResponse(null); // Clear previous route
-    setCurrentStep(null); // Clear previous step
+            {/* Menu Panel (Dropdown/Slide-in) */}
+            {isOpen && (
+                 <div // Background overlay
+                    className="fixed inset-0 bg-black bg-opacity-10 z-40"
+                    onClick={closeMenu}
+                    aria-hidden="true"
+                 ></div>
+             )}
+            <div
+                 id="main-menu"
+                 className={`absolute right-0 mt-2 w-64 origin-top-right rounded-md bg-white shadow-lg ring-1 ring-black ring-opacity-5 focus:outline-none transform transition ease-out duration-150 ${isOpen ? 'opacity-100 scale-100 z-50' : 'opacity-0 scale-95 pointer-events-none'}`}
+                 role="menu" aria-orientation="vertical" tabIndex="-1">
+                <div className="py-1 divide-y divide-gray-100" role="none">
+                    {/* Section 1: Core Navigation */}
+                    <div className="px-4 py-3">
+                        <p className="text-sm text-gray-500">Navigation</p>
+                    </div>
+                    <Link to="/" className="text-gray-700 group flex items-center px-4 py-2 text-sm hover:bg-gray-100" role="menuitem" tabIndex="-1" onClick={closeMenu}>
+                       {/* Heroicon: map */}
+                       <svg className="mr-3 h-5 w-5 text-gray-400 group-hover:text-gray-500" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" aria-hidden="true"><path fillRule="evenodd" d="M12 1.586l-4 4V4a2 2 0 10-4 0v12a2 2 0 104 0V8.414l4 4V16a2 2 0 104 0V4a2 2 0 10-4 0v-.414zM14 4a1 1 0 10-2 0v12a1 1 0 102 0V4zM4 16a1 1 0 100 2 1 1 0 000-2zM6 4a1 1 0 10-2 0v12a1 1 0 102 0V4z" clipRule="evenodd" /></svg>
+                       Map / Plan Route
+                    </Link>
 
-    try {
-      // Basic validation (more robust validation is recommended)
-      if (!origin || !destination) {
-         throw new Error("Please enter both origin and destination.");
-      }
+                    {/* Section 2: User Specific */}
+                    <SignedIn>
+                        <div className="px-4 py-3">
+                            <p className="text-sm text-gray-500">My Account</p>
+                        </div>
+                        <Link to="/saved-routes" className="text-gray-700 group flex items-center px-4 py-2 text-sm hover:bg-gray-100" role="menuitem" tabIndex="-1" onClick={closeMenu}>
+                            {/* Heroicon: bookmark */}
+                            <svg className="mr-3 h-5 w-5 text-gray-400 group-hover:text-gray-500" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" aria-hidden="true"><path d="M5 4a2 2 0 012-2h6a2 2 0 012 2v14l-5-2.5L5 18V4z" /></svg>
+                           Saved Routes
+                        </Link>
+                        <Link to="/preferences" className="text-gray-700 group flex items-center px-4 py-2 text-sm hover:bg-gray-100" role="menuitem" tabIndex="-1" onClick={closeMenu}>
+                            {/* Heroicon: cog */}
+                           <svg className="mr-3 h-5 w-5 text-gray-400 group-hover:text-gray-500" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" aria-hidden="true"><path fillRule="evenodd" d="M11.49 3.17c-.38-1.56-2.6-1.56-2.98 0a1.532 1.532 0 01-2.286.948c-1.372-.836-2.942.734-2.106 2.106.54.886.061 2.042-.947 2.287-1.561.379-1.561 2.6 0 2.978a1.532 1.532 0 01.947 2.287c-.836 1.372.734 2.942 2.106 2.106a1.532 1.532 0 012.287.947c.379 1.561 2.6 1.561 2.978 0a1.533 1.533 0 012.287-.947c1.372.836 2.942-.734 2.106-2.106a1.533 1.533 0 01.947-2.287c1.561-.379 1.561-2.6 0-2.978a1.532 1.532 0 01-.947-2.287c.836-1.372-.734-2.942-2.106-2.106a1.532 1.532 0 01-2.287-.947zM10 13a3 3 0 100-6 3 3 0 000 6z" clipRule="evenodd" /></svg>
+                           Preferences
+                        </Link>
+                         <Link to="/profile" className="text-gray-700 group flex items-center px-4 py-2 text-sm hover:bg-gray-100" role="menuitem" tabIndex="-1" onClick={closeMenu}>
+                             {/* Heroicon: user-circle */}
+                             <svg className="mr-3 h-5 w-5 text-gray-400 group-hover:text-gray-500" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" aria-hidden="true"><path fillRule="evenodd" d="M18 10a8 8 0 11-16 0 8 8 0 0116 0zm-6-3a2 2 0 11-4 0 2 2 0 014 0zm-2 4a5 5 0 00-4.546 2.916A5.986 5.986 0 0010 16a5.986 5.986 0 004.546-2.084A5 5 0 0010 11z" clipRule="evenodd" /></svg>
+                           My Profile
+                        </Link>
+                         {/* UserButton provides Sign Out */}
+                         <div className="px-4 py-3">
+                            <UserButton showName afterSignOutUrl="/" appearance={{ elements: { userButtonTrigger: "focus:ring-0 focus:outline-none text-sm"} }}/>
+                         </div>
+                    </SignedIn>
 
-      // Call the API service function
-      const response = await fetchRoute(origin, destination, preferences);
-
-      console.log("Route response received:", response);
-      setRouteResponse(response); // Update state with the route data
-
-    } catch (err) {
-      console.error("Route calculation failed:", err);
-      setError(err.message || "Failed to calculate route. Please check inputs or try again.");
-      setRouteResponse(null); // Ensure route response is null on error
-    } finally {
-      setIsLoading(false); // Ensure loading state is turned off
-    }
-  }, [preferences]); // Re-create this function if preferences change
-
-  // --- Effect to update currentStep when route changes ---
-  useEffect(() => {
-     // When a new route response arrives, set the current step to the first step
-     if (routeResponse?.routes?.[0]?.legs?.[0]?.steps?.[0]) {
-       setCurrentStep(routeResponse.routes[0].legs[0].steps[0]);
-     } else {
-       // If no route or no steps, clear the current step
-       setCurrentStep(null);
-     }
-   }, [routeResponse]); // Run only when routeResponse changes
-
-   // --- Handler for changing preferences (Example) ---
-   const handlePreferenceChange = (event) => {
-      const { name, type, checked, value } = event.target;
-      setPreferences(prev => ({
-         ...prev,
-         [name]: type === 'checkbox' ? checked : value
-      }));
-   };
-
-  // --- Render Logic ---
-  return (
-    // Root container div
-    <div className="min-h-screen bg-gradient-to-br from-blue-50 via-gray-50 to-indigo-50 flex flex-col font-sans">
-
-      {/* Header Section */}
-      <header className="bg-white shadow-md sticky top-0 z-50 w-full">
-        <nav className="container mx-auto px-4 sm:px-6 lg:px-8 py-3">
-          <h1 className="text-2xl font-bold text-indigo-700 tracking-tight">
-            Accessible Navigation
-          </h1>
-          {/* Optional: Add Nav Links here later */}
-        </nav>
-      </header>
-
-      {/* Main Content Area */}
-       <main className="flex-grow container mx-auto p-4 sm:p-6 lg:p-8 w-full">
-         {/* Grid Layout for Panels */}
-         <div className="grid grid-cols-1 lg:grid-cols-3 gap-6 h-full">
-
-           {/* Left Panel (Controls & Directions) */}
-           <div className="lg:col-span-1 bg-white p-5 rounded-lg shadow-xl flex flex-col gap-5 h-full max-h-[calc(100vh-120px)] overflow-y-auto border border-gray-200">
-             <h2 className="text-xl font-semibold text-gray-800 border-b pb-2">
-               Plan Your Route
-             </h2>
-
-             {/* --- Component: Route Form --- */}
-             {/* Renders the origin/destination inputs and submit button */}
-             <RouteForm onSubmit={handleRouteRequest} isLoading={isLoading} />
-
-             {/* Loading State Indicator */}
-             {isLoading && (
-                <div className="text-center py-4 text-indigo-600 font-medium">
-                    Calculating accessible route...
-                    {/* Optional: Add a spinner SVG here */}
+                    {/* Section 3: Auth Actions */}
+                    <SignedOut>
+                        <div className="px-4 py-3">
+                            <p className="text-sm text-gray-500">Account</p>
+                        </div>
+                        <SignInButton mode="modal" redirectUrl="/">
+                             <button className="text-gray-700 group flex items-center w-full px-4 py-2 text-sm hover:bg-gray-100" role="menuitem" tabIndex="-1" onClick={closeMenu}>
+                                 {/* Heroicon: login */}
+                                <svg className="mr-3 h-5 w-5 text-gray-400 group-hover:text-gray-500" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" aria-hidden="true"><path fillRule="evenodd" d="M3 3a1 1 0 011 1v12a1 1 0 11-2 0V4a1 1 0 011-1zm7.707 3.293a1 1 0 010 1.414L9.414 9H17a1 1 0 110 2H9.414l1.293 1.293a1 1 0 01-1.414 1.414l-3-3a1 1 0 010-1.414l3-3a1 1 0 011.414 0z" clipRule="evenodd" /></svg>
+                               Sign In
+                             </button>
+                        </SignInButton>
+                        <SignUpButton mode="modal" redirectUrl="/">
+                             <button className="text-gray-700 group flex items-center w-full px-4 py-2 text-sm hover:bg-gray-100" role="menuitem" tabIndex="-1" onClick={closeMenu}>
+                                 {/* Heroicon: user-add */}
+                                <svg className="mr-3 h-5 w-5 text-gray-400 group-hover:text-gray-500" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" aria-hidden="true"><path d="M8 9a3 3 0 100-6 3 3 0 000 6zM8 11a6 6 0 016 6H2a6 6 0 016-6zM16 7a1 1 0 10-2 0v1h-1a1 1 0 100 2h1v1a1 1 0 102 0v-1h1a1 1 0 100-2h-1V7z" /></svg>
+                               Sign Up
+                             </button>
+                        </SignUpButton>
+                    </SignedOut>
                 </div>
-             )}
-
-             {/* Error Message Display */}
-             {error && (
-                <div className="bg-red-100 border border-red-400 text-red-700 px-4 py-3 rounded-md text-sm" role="alert">
-                    <strong className="font-bold">Error: </strong>
-                    <span>{error}</span>
-                </div>
-             )}
-
-             {/* Results Panel (Directions & Audio) */}
-             {/* Show only if NOT loading AND a valid route response exists */}
-             {!isLoading && routeResponse?.routes?.[0] && (
-               <div className="mt-4 border-t border-gray-200 pt-4 space-y-4">
-                 {/* --- Component: Directions Panel --- */}
-                 <DirectionsPanel
-                     route={routeResponse.routes[0]} // Pass the first route object
-                     onStepSelect={setCurrentStep} // Pass function to update selected step state
-                 />
-                 {/* --- Component: Audio Guidance --- */}
-                 <AudioGuidance
-                      step={currentStep} // Pass the currently selected step object
-                 />
-                </div>
-             )}
-
-             {/* Placeholder Text: Initial state or No Results */}
-             {!isLoading && !error && !routeResponse && (
-                <p className="text-center text-gray-500 text-sm mt-4">
-                    Enter an origin and destination to plan your route.
-                </p>
-             )}
-             {!isLoading && routeResponse && (!routeResponse.routes || routeResponse.routes.length === 0) && (
-                 <p className="text-center text-orange-600 text-sm mt-4">
-                     No routes found matching your criteria. Please adjust origin, destination, or preferences.
-                 </p>
-              )}
-           </div> {/* End Left Panel */}
-
-           {/* Right Panel (Map) */}
-           <div className="lg:col-span-2 min-h-[400px] lg:min-h-0"> {/* Ensures map space on mobile */}
-              {/* --- Component: Map --- */}
-              {/* Displays the map and the calculated route */}
-              <MapComponent routeResponse={routeResponse} />
-           </div> {/* End Right Panel */}
-
-         </div> {/* End Grid */}
-       </main> {/* End Main Content Area */}
-
-      {/* Footer Section */}
-      <footer className="bg-gray-100 text-center py-4 text-sm text-gray-600 w-full mt-auto">
-          Accessible Navigation App © {new Date().getFullYear()}
-          {/* Optional: Add Privacy Policy, Terms links here */}
-      </footer>
-
-    </div> // End Root container
-  );
+            </div>
+        </div>
+    );
 }
 
-// --- NO PLACEHOLDER COMPONENT DEFINITIONS HERE ANYMORE ---
-// RouteForm, DirectionsPanel etc. should be in their own files and imported above.
+// --- Minimal Layout Component for Top Bar ---
+function TopBarLayout() {
+     return (
+        <div className="relative min-h-screen"> {/* Ensure layout takes full height */}
+             {/* Header for Title and Menu - positioned over the map */}
+             <header className="absolute top-0 left-0 right-0 z-20 bg-gradient-to-b from-white via-white/80 to-white/0 pt-4 pb-8 px-4 sm:px-6 lg:px-8 pointer-events-none">
+                 <div className="container mx-auto flex justify-between items-start max-w-none"> {/* Max-width none for full width container */}
+                      {/* Invisible placeholder to balance title if needed, or adjust title centering */}
+                     <div className="w-8 h-8 opacity-0 flex-shrink-0"></div>
+                     {/* Centered Title (adjust text-center if needed) */}
+                     <h1 className="text-xl sm:text-2xl font-bold text-indigo-700 tracking-tight pointer-events-auto pt-1 text-center flex-grow mx-4">
+                         Accessible Navigation
+                     </h1>
+                      {/* Hamburger Menu */}
+                     <div className="pointer-events-auto flex-shrink-0">
+                        <HamburgerMenu />
+                     </div>
+                 </div>
+             </header>
+            {/* Outlet renders the actual page content (HomePage etc.) which will include the map filling the space */}
+            <Outlet />
+        </div>
+     );
+}
+
+// --- Protected Route Component ---
+function ProtectedRoute({ children }) {
+  const { userId, isLoaded } = useAuth();
+  if (!isLoaded) {
+      return (
+          <div className="h-screen flex justify-center items-center">
+               {/* Add a loading spinner here */}
+               Loading session...
+           </div>
+      );
+  }
+  if (!userId) return <RedirectToSignIn />;
+  return children;
+}
+
+// --- App Component with Routes ---
+function App() {
+  return (
+    // Context Providers should ideally be in main.jsx if they wrap the whole app
+    // <PreferencesProvider>
+        <Routes>
+            {/* Use TopBarLayout for main map view and potentially other pages */}
+            <Route element={<TopBarLayout />}>
+                <Route index element={<HomePage />} />
+                <Route path="/saved-routes" element={ <ProtectedRoute> <SavedRoutesPage /> </ProtectedRoute> } />
+                <Route path="/preferences" element={ <ProtectedRoute> <PreferencesPage /> </ProtectedRoute> } />
+                <Route path="/profile" element={ <ProtectedRoute> <UserProfilePage /> </ProtectedRoute> } />
+            </Route>
+
+            {/* Fallback 404 Route (no layout) */}
+            <Route path="*" element={
+                <div className="min-h-screen flex flex-col justify-center items-center">
+                    <h2 className='text-2xl font-semibold mb-4'>404: Page Not Found</h2>
+                    <Link to="/" className='text-indigo-600 hover:underline'>Go Home</Link>
+                </div>
+            } />
+        </Routes>
+    // </PreferencesProvider>
+  );
+}
 
 export default App;
